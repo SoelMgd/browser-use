@@ -3,6 +3,17 @@ import base64
 import logging
 from typing import List, Dict, Any, Optional
 from pathlib import Path
+from PIL import Image
+import io
+
+# Import des classes LLM de Browser-Use
+from browser_use.llm.messages import (
+    UserMessage, 
+    ContentPartTextParam, 
+    ContentPartImageParam, 
+    ImageURL,
+    BaseMessage
+)
 
 # Configuration du logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -68,7 +79,7 @@ def history_to_messages(history_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         url = step.get('state', {}).get('url', '')
         if url:
-            truncated_url = url[:120]+'...' if len(url) >120 else url
+            truncated_url = url[:100]+'...' if len(url) >100 else url
             actions_str += f'the screenshot has been taken at this url {truncated_url}. '
             logger.debug(f"Step {i}: URL found: {truncated_url}")
         
@@ -81,7 +92,12 @@ def history_to_messages(history_data: Dict[str, Any]) -> List[Dict[str, Any]]:
             actions_str += "No actions found for this step"
 
         step_dict['actions'] = actions_str
-        step_dict['screenshot'] = step.get('state', {}).get('screenshot', '')
+        # Crop screenshot to target size
+        screenshot = step.get('state', {}).get('screenshot', '')
+        if screenshot:
+            step_dict['screenshot'] = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
+        else:
+            step_dict['screenshot'] = ''
         
         logger.debug(f"Step {i}: Created message: {actions_str[:100]}...")
         steps.append(step_dict)
@@ -174,7 +190,7 @@ def save_screenshot_to_file(screenshot_base64: str, output_path: str) -> bool:
 
 def save_all_screenshots(history_data: Dict[str, Any], output_dir: str) -> List[str]:
     """
-    Sauvegarde tous les screenshots de l'historique
+    Sauvegarde tous les screenshots de l'historique (cropped to target size)
     
     Args:
         history_data: Données de l'historique
@@ -189,9 +205,11 @@ def save_all_screenshots(history_data: Dict[str, Any], output_dir: str) -> List[
     for i, step in enumerate(history_data.get('history', [])):
         screenshot = step.get('state', {}).get('screenshot', '')
         if screenshot:
+            # Crop the screenshot before saving
+            cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
             screenshots.append({
                 'step_number': i,
-                'screenshot_base64': screenshot
+                'screenshot_base64': cropped_screenshot
             })
     
     saved_files = []
@@ -204,8 +222,136 @@ def save_all_screenshots(history_data: Dict[str, Any], output_dir: str) -> List[
         if save_screenshot_to_file(screenshot['screenshot_base64'], str(output_path)):
             saved_files.append(str(output_path))
     
-    logger.info(f"Saved {len(saved_files)} screenshots")
+    logger.info(f"Saved {len(saved_files)} cropped screenshots")
     return saved_files
+
+
+def crop_screenshot(screenshot_base64: str, target_size: Dict[str, int] = {'width': 1280, 'height': 1100}) -> str:
+    """
+    Crop a base64 screenshot to the target size
+    
+    Args:
+        screenshot_base64: Base64 encoded screenshot
+        target_size: Target size as {'width': int, 'height': int}
+        
+    Returns:
+        Cropped screenshot as base64 string
+    """
+    try:
+        # Decode base64 to image
+        image_data = base64.b64decode(screenshot_base64)
+        image = Image.open(io.BytesIO(image_data))
+        
+        # Get original dimensions
+        original_width, original_height = image.size
+        target_width = target_size['width']
+        target_height = target_size['height']
+        
+        logger.debug(f"Original size: {original_width}x{original_height}, Target size: {target_width}x{target_height}")
+        
+        # Calculate crop box (center crop)
+        left = max(0, (original_width - target_width) // 2)
+        top = max(0, (original_height - target_height) // 2)
+        right = min(original_width, left + target_width)
+        bottom = min(original_height, top + target_height)
+        
+        # Crop the image
+        cropped_image = image.crop((left, top, right, bottom))
+        
+        # Convert back to base64
+        buffer = io.BytesIO()
+        cropped_image.save(buffer, format='PNG')
+        cropped_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        
+        logger.debug(f"Cropped image from {original_width}x{original_height} to {cropped_image.size[0]}x{cropped_image.size[1]}")
+        return cropped_base64
+        
+    except Exception as e:
+        logger.warning(f"Failed to crop screenshot: {e}. Returning original.")
+        return screenshot_base64
+
+
+def history_to_llm_messages(history_data: Dict[str, Any]) -> List[BaseMessage]:
+    """
+    Convert history data to a list of LLM-compatible messages.
+    
+    Each step in the history becomes a UserMessage containing:
+    - Text content describing the actions taken
+    - Image content (screenshot) if available
+    
+    Args:
+        history_data: Loaded history data
+        
+    Returns:
+        List of BaseMessage objects ready to be sent to LLM
+    """
+    logger.info("Converting history to LLM messages")
+    
+    messages: List[BaseMessage] = []
+    history_list = history_data.get('history', [])
+    
+    for i, step in enumerate(history_list):
+        logger.debug(f"Converting step {i} to LLM message")
+        
+        # Extract actions text
+        model_output = step.get('model_output', {})
+        action_strings = []
+        
+        if model_output and 'action' in model_output:
+            for action in model_output['action']:
+                action_detailed = get_detailed_action_decription(action)
+                action_strings.append(action_detailed)
+        
+        # Build the text content
+        actions_str = f"This is step {i}, "
+        
+        url = step.get('state', {}).get('url', '')
+        if url:
+            truncated_url = url[:100] + '...' if len(url) > 100 else url
+            actions_str += f'the screenshot has been taken at this url {truncated_url}. '
+        
+        if len(action_strings) == 1:
+            actions_str += str(action_strings[0])
+        elif len(action_strings) > 1:
+            for j, action in enumerate(action_strings):
+                actions_str += f'The {j}th action taken for step {i} is ' + str(action_strings[j])
+        else:
+            actions_str += "No actions found for this step"
+        
+        # Get screenshot
+        screenshot = step.get('state', {}).get('screenshot', '')
+        if screenshot:
+            # Crop screenshot to target size
+            cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
+            
+            # Create content parts: text + image
+            content_parts = [
+                ContentPartTextParam(text=actions_str),
+                ContentPartImageParam(
+                    image_url=ImageURL(
+                        url=f"data:image/png;base64,{cropped_screenshot}",
+                        media_type='image/png',
+                        detail='auto'
+                    )
+                )
+            ]
+        else:
+            # Only text content
+            content_parts = [ContentPartTextParam(text=actions_str)]
+        
+        # Create UserMessage
+        user_message = UserMessage(
+            role='user',
+            content=content_parts,
+            name=f"step_{i}"
+        )
+        
+        messages.append(user_message)
+        logger.debug(f"Created message for step {i}: {actions_str[:100]}...")
+    
+    logger.info(f"Successfully converted {len(messages)} steps to LLM messages")
+    return messages
+
 
 
 if __name__ == '__main__':
@@ -232,6 +378,18 @@ if __name__ == '__main__':
         output_dir = './screenshots'
         saved_files = save_all_screenshots(history_data, output_dir)
         print(f"\n💾 Screenshots sauvegardés: {len(saved_files)} fichiers")
+        
+        # Example: convert to LLM messages
+        logger.info("Converting to LLM messages:")
+        llm_messages = history_to_llm_messages(history_data)
+        print(f"\n🤖 Created {len(llm_messages)} LLM messages")
+        
+        # Print first message as example
+        if llm_messages:
+            first_msg = llm_messages[0]
+            print(f"First message type: {type(first_msg)}")
+            print(f"First message content: {first_msg.text[:200]}...")
+            print(f"First message has image: {any(isinstance(part, ContentPartImageParam) for part in first_msg.content) if isinstance(first_msg.content, list) else False}")
         
     except FileNotFoundError:
         logger.error(f"❌ File not found: {history_file}")
