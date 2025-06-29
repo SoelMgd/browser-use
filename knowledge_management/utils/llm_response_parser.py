@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 from dataclasses import dataclass
 
 
@@ -9,9 +9,12 @@ class ParsedLLMResponse:
     """Classe pour stocker la réponse parsée du LLM évaluateur"""
     navigation_graph: Dict[str, Any]
     verdict: str
-    status: str  # 'SUCCESS', 'FAILURE', ou 'IMPOSSIBLE'
-    guide: str
+    guide: Dict[str, Any]
+    failure_guide: str
     raw_response: str
+    task_label: str  # First element of the tuple (SUCCESS, FAILURE, IMPOSSIBLE)
+    website_url: str  # Second element of the tuple (main URL)
+    task_title: str  # Third element of the tuple (generalized title)
 
 
 class LLMResponseParser:
@@ -21,6 +24,8 @@ class LLMResponseParser:
         self.json_pattern = r'```json\s*(.*?)\s*```'
         self.verdict_pattern = r'<verdict>\s*(.*?)\s*</verdict>'
         self.guide_pattern = r'<guide>\s*(.*?)\s*</guide>'
+        self.failure_guide_pattern = r'<failure_guide>\s*(.*?)\s*</failure_guide>'
+        self.tuple_pattern = r'\([\'"]([^\'"]+)[\'"],\s*[\'"]([^\'"]+)[\'"],\s*[\'"]([^\'"]+)[\'"]\)'
     
     def parse(self, llm_response: str) -> ParsedLLMResponse:
         """
@@ -32,33 +37,44 @@ class LLMResponseParser:
         Returns:
             ParsedLLMResponse: Objet contenant les éléments parsés
         """
-        # Extraire le graph de navigation (JSON)
+        # Extraire le graph de navigation (JSON avant le verdict)
         navigation_graph = self._extract_navigation_graph(llm_response)
         
         # Extraire le verdict
         verdict = self._extract_verdict(llm_response)
         
-        # Déterminer le status basé sur le verdict
-        status = self._determine_status(verdict)
+        # Extraire le tuple du verdict
+        task_label, website_url, task_title = self._extract_tuple_from_verdict(verdict)
         
-        # Extraire le guide
+        # Extraire le guide (JSON après le verdict)
         guide = self._extract_guide(llm_response)
+        
+        # Extraire le failure_guide (optionnel)
+        failure_guide = self._extract_failure_guide(llm_response)
         
         return ParsedLLMResponse(
             navigation_graph=navigation_graph,
             verdict=verdict,
-            status=status,
             guide=guide,
-            raw_response=llm_response
+            failure_guide=failure_guide,
+            raw_response=llm_response,
+            task_label=task_label,
+            website_url=website_url,
+            task_title=task_title
         )
     
     def _extract_navigation_graph(self, response: str) -> Dict[str, Any]:
-        """Extrait le graph de navigation depuis les balises ```json```"""
-        match = re.search(self.json_pattern, response, re.DOTALL)
-        if not match:
+        """Extrait le graph de navigation depuis le premier bloc ```json``` (avant le verdict)"""
+        # Trouver tous les blocs JSON
+        json_matches = list(re.finditer(self.json_pattern, response, re.DOTALL))
+        
+        if not json_matches:
             raise ValueError("Aucun graph de navigation JSON trouvé dans la réponse")
         
-        json_content = match.group(1).strip()
+        # Prendre le premier bloc JSON (avant le verdict)
+        first_json_match = json_matches[0]
+        json_content = first_json_match.group(1).strip()
+        
         try:
             return json.loads(json_content)
         except json.JSONDecodeError as e:
@@ -71,6 +87,27 @@ class LLMResponseParser:
             raise ValueError("Aucun verdict trouvé dans la réponse")
         
         return match.group(1).strip()
+    
+    def _extract_tuple_from_verdict(self, verdict: str) -> Tuple[str, str, str]:
+        """Extrait le tuple (LABEL, url, title) du verdict"""
+        match = re.search(self.tuple_pattern, verdict)
+        if not match:
+            # Fallback: try to extract with different quote styles
+            fallback_pattern = r'\(([^,]+),\s*([^,]+),\s*([^)]+)\)'
+            match = re.search(fallback_pattern, verdict)
+            if not match:
+                raise ValueError("Aucun tuple trouvé dans le verdict")
+            
+            # Clean up the extracted values
+            task_label = match.group(1).strip().strip("'\"")
+            website_url = match.group(2).strip().strip("'\"")
+            task_title = match.group(3).strip().strip("'\"")
+        else:
+            task_label = match.group(1)
+            website_url = match.group(2)
+            task_title = match.group(3)
+        
+        return task_label, website_url, task_title
     
     def _determine_status(self, verdict: str) -> str:
         """Détermine le status basé sur le contenu du verdict"""
@@ -85,11 +122,31 @@ class LLMResponseParser:
         else:
             return 'UNKNOWN'
     
-    def _extract_guide(self, response: str) -> str:
-        """Extrait le guide depuis les balises <guide></guide>"""
-        match = re.search(self.guide_pattern, response, re.DOTALL)
+    def _extract_guide(self, response: str) -> Dict[str, Any]:
+        """Extrait le guide depuis le deuxième bloc ```json``` (après le verdict)"""
+        # Trouver tous les blocs JSON
+        json_matches = list(re.finditer(self.json_pattern, response, re.DOTALL))
+        
+        if len(json_matches) < 2:
+            # Si il n'y a qu'un seul JSON ou aucun, retourner un dictionnaire vide
+            return {}
+        
+        # Prendre le deuxième bloc JSON (après le verdict)
+        second_json_match = json_matches[1]
+        json_content = second_json_match.group(1).strip()
+        
+        try:
+            return json.loads(json_content)
+        except json.JSONDecodeError as e:
+            # En cas d'erreur de parsing, retourner un dictionnaire vide
+            print(f"Warning: Erreur de parsing JSON du guide: {e}")
+            return {}
+    
+    def _extract_failure_guide(self, response: str) -> str:
+        """Extrait le failure_guide depuis les balises <failure_guide></failure_guide>"""
+        match = re.search(self.failure_guide_pattern, response, re.DOTALL)
         if not match:
-            return ""  # Le guide peut être optionnel
+            return ""  # Le failure_guide peut être optionnel
         
         return match.group(1).strip()
 
@@ -186,42 +243,31 @@ The user successfully navigated from the home page to a specific property in Par
 2. View search results
 3. Select a specific property
 4. Access the booking interface with room options
+
+('SUCCESS', 'https://www.booking.com/', 'Book accommodation on Booking.com')
 </verdict>
 
-### <guide>
-To book accommodation on Booking.com:
-
-1. On the Home Page:
-   - Enter your destination in the search bar
-   - Select your check-in and check-out dates
-   - Set number of guests and rooms
-   - Click "Search"
-
-2. On the Search Results Page:
-   - Use filters on the left to narrow down options
-   - Browse property cards
-   - Click "See availability" on your chosen property
-
-3. On the Property Detail Page:
-   - Review property information and images
-   - Select number of rooms needed
-   - Choose room type from available options
-   - Click "I'll reserve" to proceed with booking
-
-Tips:
-- Use filters to narrow down options matching your needs
-- Check cancellation policies and included amenities
-- Review property location and access information
-- Compare room types and prices before selecting
+### Reusable lessons
 </guide>
+
+```json
+{  
+  "Booking.com: filter search results by air conditioning": "On the search results page, scroll the left sidebar until you see the 'Facilities' section, then tick the checkbox for 'Air conditioning' (AC).",  
+  "Amazon: download an invoice": "On the 'Your Orders' page: from the top-right account menu, locate the order, click 'Invoice' or the download icon near the order summary."
+}
+```
 '''
     
     try:
         parsed_response = parse_llm_evaluation_response(example_response)
         print("Parsing réussi!")
-        print(f"Status: {parsed_response.status}")
+        print(f"Task Label: {parsed_response.task_label}")
+        print(f"Website URL: {parsed_response.website_url}")
+        print(f"Task Title: {parsed_response.task_title}")
         print(f"Nombre de pages dans le graph: {len(parsed_response.navigation_graph)}")
         print(f"Verdict: {parsed_response.verdict[:100]}...")
-        print(f"Guide: {parsed_response.guide[:100]}...")
+        print(f"Guide (type): {type(parsed_response.guide)}")
+        print(f"Guide (contenu): {parsed_response.guide}")
+        print(f"Failure Guide: {parsed_response.failure_guide}")
     except Exception as e:
         print(f"Erreur lors du parsing: {e}") 

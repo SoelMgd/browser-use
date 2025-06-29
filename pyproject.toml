@@ -37,6 +37,8 @@ dependencies = [
     "anthropic>=0.54.0",
     "groq>=0.28.0",
     "dotenv>=0.9.9",
+    "sentence-transformers>=4.1.0",
+    "chromadb>=1.0.13",
 ]
 # google-api-core: only used for Google LLM APIs
 # pyperclip: only used for examples that use copy/paste
