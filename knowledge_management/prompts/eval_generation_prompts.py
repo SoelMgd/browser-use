@@ -4,6 +4,7 @@ This is a complex task and will be carried out in several steps. Here is the pla
 
 ## Step 1: Input
 You will receive:
+- A report of the user's task, explaining what he tried to do and what he did not try.
 - A sequence of screenshots representing the user's navigation attempt to achieve a specific goal. Bounding boxes with IDs have been added on the screenshot.
 - For each screenshot: the action taken by the user is provided, if the user clicked on an element, its ID is specified so you can identified it on the screenshot.
 ## Step 2: Identify visited pages

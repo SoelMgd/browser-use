@@ -129,11 +129,12 @@ def test_complete_system():
     print("-" * 40)
     
     # Save test plan
-    success = rag_manager.store_successful_plan(
-        "Login and search properties on Airbnb",
-        "1. Navigate to airbnb.com\n2. Click login button\n3. Enter credentials\n4. Search for properties",
-        "test_001"
-    )
+    test_plans = {
+        "Login and search properties on Airbnb": "1. Navigate to airbnb.com\n2. Click login button\n3. Enter credentials\n4. Search for properties",
+        "Filter properties by amenities": "1. On search results page\n2. Scroll to filters section\n3. Select desired amenities\n4. Apply filters"
+    }
+    
+    success = rag_manager.store_successful_plan(test_plans, "test_001")
     print(f"  RAG plan save: {'✅' if success else '❌'}")
     
     # Search similar plans

@@ -5,10 +5,9 @@ Prompts pour la génération de guides optimisés basés sur les connaissances a
 GUIDE_GENERATION_SYSTEM_PROMPT = """You are an expert web automation strategist. Your role is to analyze a task, previous successful plans, navigation patterns, and previous attempts to generate an optimized execution guide.
 
 Your goal is to create a comprehensive, step-by-step guide that will help an AI agent successfully complete the task by leveraging:
-1. Previous successful plans for similar tasks
-2. Navigation patterns from the website's structure
-3. Lessons learned from previous failed attempts
-4. Best practices for the specific website
+1. The website's structure through navigation graphs (if any)
+2. Lessons learned from previous failed attempts (if any)
+3. Previous recommendations from evaluator that did not work (if any)
 
 ## Your Output Format
 
@@ -37,10 +36,6 @@ Detailed step-by-step guide:
 - Anticipate common issues based on previous attempts
 - Provide fallback strategies
 - Include verification steps
-
-### Success Criteria
-- How to verify the task is completed successfully
-- What to check to ensure no errors occurred
 
 ## Guidelines
 

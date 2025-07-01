@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 # Add project path
@@ -27,6 +27,7 @@ from dotenv import load_dotenv
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.llm import ChatAnthropic
+from browser_use.llm.messages import UserMessage
 
 # Local imports
 from knowledge_management.utils.history_parser import load_history_from_file, history_to_llm_messages, save_all_screenshots
@@ -100,21 +101,25 @@ class TaskEvaluator:
         task_hash = hash(task) % 10000
         return f"task_{timestamp}_{task_hash}"
     
-    def _save_navigation_graph(self, navigation_graph: dict, website_url: str = None):
+    async def _save_navigation_graph(self, navigation_graph: dict, website_url: str = None):
         """
         Save navigation graph using NavigationGraphManager
         """
         try:
             # Use NavigationGraphManager to save
-            success = self.nav_manager.save_navigation_graph(navigation_graph, website_url)
+            success = await self.nav_manager.save_navigation_graph(navigation_graph, website_url)
             if not success:
                 logger.warning("⚠️ Failed to save navigation graph")
         except Exception as e:
             logger.error(f"❌ Error saving navigation graph: {e}")
     
-    def _save_successful_plan(self, task_id: str, guide: dict):
+    def _save_plans(self, task_id: str, guide: dict):
         """
         Save successful plan (now a dictionary of guides)
+        
+        Args:
+            task_id: Task ID
+            guide: Dictionary of guides with titles as keys
         """
         if not guide:
             logger.warning("⚠️ No guide to save")
@@ -131,60 +136,80 @@ class TaskEvaluator:
         logger.info(f"✅ Successful plan saved: {filepath}")
         
         # Save each guide in RAG system
-        for title, content in guide.items():
-            try:
-                success = self.rag_manager.store_successful_plan(
-                    title, content, task_id
-                )
-                if success:
-                    logger.info(f"💾 Guide '{title}' stored in RAG system")
-                else:
-                    logger.warning(f"⚠️ Failed to store guide '{title}' in RAG")
-            except Exception as e:
-                logger.error(f"❌ Error storing guide '{title}' in RAG: {e}")
+        success = self.rag_manager.store_successful_plan(guide, task_id)
+        if success:
+            logger.info(f"💾 All guides stored in RAG system")
+        else:
+            logger.warning(f"⚠️ Failed to store some guides in RAG")
     
-    def _build_navigation_graph_context(self, navigation_graph: str) -> str:
+    def _get_rag_plans_context(self, task_title: Optional[str]) -> str:
         """
-        Write context sentences around the navigation graph
-        """
-        return f"""
-Here are the navigation graph which gather all the knowledge we have on this websites (pages already visited + key elements).
-Use this to better understand the website structure and generate good recommendations.
-
-Navigation graph:
-{navigation_graph}
-
-"""
-    
-    def _build_plans_context(self, task_title: str = None) -> str:
-        """
-        Write context messages around the plans retrieved from the RAG
-        """
-        context_parts = []
+        Get RAG plans context for a given task title
         
-        if task_title:
-            # Just add some context sentences around the plans
+        Args:
+            task_title: Task title to search for (can be None)
+            
+        Returns:
+            Formatted context from similar plans
+        """
+        if not task_title:
+            logger.warning("⚠️ No task title available for RAG search.")
+            return "No task title available for RAG search."
+        
+        try:
             similar_plans = self.rag_manager.find_similar_plans(task_title, top_k=10)
             if similar_plans:
-                rag_context = self.rag_manager.build_context_from_similar_plans(similar_plans)
-                context_parts.append(rag_context)
-                context_parts.append("")  # Empty row
+                logger.info(f"🔍 Found {len(similar_plans)} similar plans")
+                return self.rag_manager.build_context_from_similar_plans(similar_plans)
+            else:
+                logger.warning("⚠️ No similar successful plans found in RAG database.")
+                return "No similar successful plans found in RAG database."
+        except Exception as e:
+            logger.warning(f"⚠️ Error retrieving RAG plans: {e}")
+            return "Error retrieving RAG plans."
+    
+    def _get_navigation_graph_context(self, website_url: str) -> str:
+        """
+        Get navigation graph context for a given website
         
-        return "\n".join(context_parts)
-
+        Args:
+            website_url: Website URL to search for
+            
+        Returns:
+            Formatted context from navigation graphs
+        """
+        try:
+            graphs = self.nav_manager.find_navigation_graphs_for_website(website_url)
+            if graphs:
+                return self.nav_manager.build_navigation_context(graphs, max_graphs=3)
+            else:
+                return "No previous navigation patterns available for this website."
+        except Exception as e:
+            logger.warning(f"⚠️ Error retrieving navigation graphs: {e}")
+            return "Error retrieving navigation patterns."
+    
     def _build_failure_recommendations_context(self, verdict: str, failure_guide: str) -> str:
         """
-        Write context sentences around the failure guide from last failed attempt.
+        Build context from failure recommendations
+        
+        Args:
+            verdict: Evaluation verdict
+            failure_guide: Failure guide from evaluator
+            
+        Returns:
+            Formatted context for previous attempt
         """
-        return f"""
-## A precedent user already tried this task before and an evaluator evaluated it, here is his verdict:
+        return f"""## A previous user tried this task and an evaluator provided feedback:
 
+**Verdict:**
 {verdict}
 
-In order to try again efficiently and avoid common pitfalls. He wrote some recommendations that have not been tried and could be useful: 
-{failure_guide}"""
+**Failure Guide (recommendations for next attempt):**
+{failure_guide}
+
+Use this information to understand what was tried before and avoid repeating unsuccessful approaches."""
     
-    async def _evaluate_task_execution(self, history_file: str, task: str) -> ParsedLLMResponse:
+    async def _evaluate_task_execution(self, history_file: str, task: str, report: str) -> ParsedLLMResponse:
         """Evaluate task execution with evaluator LLM"""
         try:
             # Load history
@@ -202,6 +227,13 @@ In order to try again efficiently and avoid common pitfalls. He wrote some recom
 
 Please evaluate the user trajectory for this goal."""
             system_message = SystemMessage(content=enhanced_system_prompt)
+
+            # Create user message with verdict
+            if report:
+                verdict_message = "The user also provided his own report of his task. This is useful to understand is trajectory: \n"
+                verdict_message += report
+                user_message = UserMessage(content=verdict_message)
+                llm_messages.append(user_message)
             
             all_messages = [system_message] + llm_messages
             
@@ -219,7 +251,7 @@ Please evaluate the user trajectory for this goal."""
             logger.error(f"❌ Error during evaluation: {e}")
             raise
     
-    async def _execute_task(self, task: str, enhanced_prompt: Optional[str] = None) -> str:
+    async def _execute_task(self, task: str, enhanced_prompt: Optional[str] = None) -> Tuple[str, str]:
         """Execute a task with Browser-Use"""
         try:
             # Create agent with custom message context if provided
@@ -239,23 +271,27 @@ Please evaluate the user trajectory for this goal."""
             # Execute task
             logger.info("🚀 Executing task...")
             history = await agent.run(max_steps=25)
+
+            logger.info(f"History final result: {history.final_result()}")
+            logger.info(f"History is_done: {history.is_done()}")
             
             # Save history
             history_file = self.tmp_dir / "history.json"
             history.save_to_file(str(history_file))
             
-            return str(history_file)
+            return str(history_file), history.final_result()
             
         except Exception as e:
             logger.error(f"❌ Error during task execution: {e}")
             raise
     
-    async def run_task_with_evaluation(self, task: str) -> dict:
+    async def run_task_with_evaluation(self, task: str, website_url: str) -> dict:
         """
         Execute a task with evaluation and iterative improvement
         
         Args:
             task: The task to execute
+            website_url: The website URL where the task should be executed
             
         Returns:
             dict: Execution results
@@ -263,71 +299,51 @@ Please evaluate the user trajectory for this goal."""
         task_id = self._generate_task_id(task)
         logger.info(f"🎯 Starting task execution: {task_id}")
         logger.info(f"📝 Task: {task}")
+        logger.info(f"🌐 Website: {website_url}")
         
         results = {
             'task_id': task_id,
             'task': task,
+            'website_url': website_url,
             'attempts': [],
             'final_status': None,
             'successful_plan': None
         }
         
         current_failure_guide = None
-        current_task_title = None
-        current_website_url = None
-        current_navigation_graph = None
+        current_task_title = task
+        current_website_url = website_url  # Use provided website_url
         current_verdict = None
+        
+        optimized_guide = None # Initialize empty optimized guide
         
         for attempt in range(1, self.max_attempts + 1):
             logger.info(f"\n🔄 Attempt {attempt}/{self.max_attempts}")
             
             try:
-                # Generate optimized guide for this attempt !
-                optimized_guide = None
-                if attempt == 1:
-                    # First attempt: generate guide based on existing knowledge
-                    logger.info("🎯 Generating optimized guide for first attempt...")
-                    optimized_guide = await self.guide_generator.generate_optimized_guide(
-                        task=task,
-                        website_url="http://airbnb.com",  # Default URL, will be updated after evaluation
-                        task_title=None,  # Will be determined after evaluation
-                        previous_guide=None,
-                        attempt_count=0
-                    )
-                else:
-                    # Subsequent attempts: use context from previous failed attempt
-                    logger.info("🎯 Generating optimized guide based on previous attempt context...")
-                    
-                    # Build context from previous attempt
-                    context_parts = []
-                    
-                    # Add navigation graph context if available
-                    if current_navigation_graph:
-                        nav_context = self._build_navigation_graph_context(json.dumps(current_navigation_graph, indent=2))
-                        context_parts.append(nav_context)
-                    
-                    # Add plans context if available
-                    if current_task_title:
-                        plans_context = self._build_plans_context(current_task_title)
-                        if plans_context:
-                            context_parts.append(plans_context)
-                    
-                    # Add failure recommendations context if available
-                    if current_verdict and current_failure_guide:
-                        failure_context = self._build_failure_recommendations_context(current_verdict, current_failure_guide)
-                        context_parts.append(failure_context)
-                    
-                    # Combine all context
-                    combined_context = "\n".join(context_parts) if context_parts else None
-                    
-                    optimized_guide = await self.guide_generator.generate_optimized_guide(
-                        task=task,
-                        website_url=current_website_url or "http://airbnb.com",
-                        task_title=current_task_title,
-                        previous_guide=combined_context,
-                        attempt_count=attempt - 1
-                    )
+
+                # Subsequent attempts: use context from previous failed attempt
+                logger.info("🎯 Generating optimized guide based on previous attempt context...")
                 
+                # Get contexts for subsequent attempts
+                rag_context = self._get_rag_plans_context(current_task_title)
+                nav_context = self._get_navigation_graph_context(current_website_url)
+                
+                # Build failure context
+                failure_context = ""
+                if current_verdict and current_failure_guide:
+                    failure_context = self._build_failure_recommendations_context(current_verdict, current_failure_guide)
+                
+                optimized_guide = await self.guide_generator.generate_optimized_guide(
+                    task=task,
+                    website_url=current_website_url,
+                    rag_plans_context=rag_context,
+                    navigation_graph_context=nav_context,
+                    previous_guide_context=failure_context,
+                    attempt_count=attempt - 1
+                )
+                
+                logger.info(f"🎯 Optimized guide generated: {optimized_guide}")
                 # Build message context with optimized guide
                 message_context = None
                 if optimized_guide:
@@ -338,20 +354,23 @@ Please evaluate the user trajectory for this goal."""
 Follow this guide to complete the task efficiently and avoid common pitfalls."""
                 
                 # Execute task
-                history_file = await self._execute_task(task, message_context)
+                history_file, report = await self._execute_task(task, message_context)
                 
                 # Evaluate result
-                evaluation = await self._evaluate_task_execution(history_file, task)
+                evaluation = await self._evaluate_task_execution(history_file, task, report)
                 
-                # Save navigation graph
-                self._save_navigation_graph(evaluation.navigation_graph, evaluation.website_url)
+                # Save navigation graph with aggregation
+                await self._save_navigation_graph(evaluation.navigation_graph, evaluation.website_url)
                 
                 # Save screenshots
                 screenshots = self._save_screenshots(task_id, attempt, history_file)
                 
                 # Update metadata for next attempts
                 current_task_title = evaluation.task_title
-                current_website_url = evaluation.website_url
+                # Update website URL if evaluator found a different one, otherwise keep the original
+                if evaluation.website_url and evaluation.website_url != current_website_url:
+                    logger.info(f"🌐 Website URL updated from {current_website_url} to {evaluation.website_url}")
+                    current_website_url = evaluation.website_url
                 current_navigation_graph = evaluation.navigation_graph
                 current_verdict = evaluation.verdict
                 
@@ -370,13 +389,15 @@ Follow this guide to complete the task efficiently and avoid common pitfalls."""
                 results['attempts'].append(attempt_result)
                 
                 logger.info(f"📊 Attempt {attempt} - Status: {evaluation.task_label}")
+                logger.info(f"Verdict: {evaluation.verdict}")
+
                 
                 # If success, save plan in RAG and finish
                 if evaluation.task_label == 'SUCCESS':
                     logger.info("✅ Task completed successfully!")
                     
                     # Save to file system (compatibility)
-                    self._save_successful_plan(task_id, evaluation.guide)
+                    self._save_plans(task_id, evaluation.guide)
                     
                     results['final_status'] = 'SUCCESS'
                     results['successful_plan'] = evaluation.guide
@@ -385,6 +406,7 @@ Follow this guide to complete the task efficiently and avoid common pitfalls."""
                 # If failure, use failure_guide for next attempt
                 elif evaluation.task_label == 'FAILURE':
                     current_failure_guide = evaluation.failure_guide
+                    self._save_plans(task_id, evaluation.guide)
                     logger.info("⚠️ Failure detected, failure_guide updated for next attempt")
                     
                 # If impossible, stop
@@ -435,22 +457,23 @@ async def main():
 
     CREDENTIALS = """ To login, use the following credentials: {
   username: 'soel@twin.so',
-  password: 'Agent123456!',
+  password: '--!',
 }"""
+    
     # Configuration
+    WEBSITE_URL = "https://www.bbb.org"
     TASK = """
-    "Log in to your Airbnb account, save a Guest Favorite property to your wishlist, and then go to your wishlist and remove the property you previously added.
-    Only use http://airbnb.com to achieve the task. Don't go to any other site. The task is achievable with just navigation from this site."
-    """
+    Search for any businesses in Los Angeles with a BBB rating of A+ and list the names of the first five businesses displayed.
+    Only use https://www.bbb.org to achieve the task. Don't go to any other site. The task is achievable with just navigation from this site."""
 
-    TASK = TASK + CREDENTIALS
+    TASK = TASK #+ CREDENTIALS
     
     try:
         # Create evaluator
         evaluator = TaskEvaluator(max_attempts=3)
         
         # Execute task with evaluation
-        results = await evaluator.run_task_with_evaluation(TASK)
+        results = await evaluator.run_task_with_evaluation(TASK, WEBSITE_URL)
         
         # Display final results
         print("\n" + "="*80)
@@ -471,7 +494,7 @@ async def main():
         for attempt in results['attempts']:
             print(f"  Attempt {attempt['attempt_number']}: {attempt.get('status', 'COMPLETED')}")
             if 'verdict' in attempt:
-                print(f"    Verdict: {attempt['verdict'][:100]}...")
+                print(f"    Verdict: {attempt['verdict']}...")
             if 'screenshots' in attempt and attempt['screenshots']:
                 print(f"    Screenshots: {len(attempt['screenshots'])} images saved")
         
@@ -479,18 +502,10 @@ async def main():
         print(f"\n📚 RAG system statistics:")
         rag_stats = evaluator.rag_manager.get_plans_statistics()
         print(f"  Stored plans: {rag_stats['total_plans']}")
-        print(f"  Unique websites: {rag_stats['unique_websites']}")
-        if rag_stats['websites']:
-            print(f"  Websites: {', '.join(rag_stats['websites'])}")
-        
-        # Display complete system statistics
-        print(f"\n🎯 Complete system statistics:")
-        system_stats = evaluator.guide_generator.get_system_statistics()
-        print(f"  Total knowledge items: {system_stats['total_knowledge_items']}")
-        print(f"  RAG plans: {system_stats['rag']['total_plans']}")
-        print(f"  Navigation graphs: {system_stats['navigation']['total_graphs']}")
-        print(f"  Covered websites: {system_stats['rag']['unique_websites'] + system_stats['navigation']['unique_websites']}")
-        
+        print(f"  Unique task titles: {rag_stats['unique_task_titles']}")
+        if rag_stats['task_titles']:
+            print(f"  Task titles: {', '.join(rag_stats['task_titles'][:5])}...")
+
     except Exception as e:
         logger.error(f"❌ Error in main: {e}", exc_info=True)
 

@@ -9,10 +9,15 @@ Ce module permet de :
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
+
+from browser_use.llm import ChatAnthropic
+from browser_use.llm.messages import SystemMessage, UserMessage
+from ..prompts.graph_aggregation_prompts import SYSTEM_PROMPT_PROMPT_AGGREGATION
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +37,19 @@ class NavigationGraphManager:
         
         self.graphs_dir = graphs_dir
         self.graphs_dir.mkdir(exist_ok=True)
+        
+        # Initialiser le LLM pour la fusion des graphs
+        api_key = os.getenv('ANTHROPIC_API_KEY')
+        if api_key:
+            self.merge_llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=api_key,
+                max_tokens=4000,
+                temperature=0.1
+            )
+        else:
+            self.merge_llm = None
+            logger.warning("⚠️ ANTHROPIC_API_KEY non défini, la fusion des graphs sera désactivée")
         
         logger.info(f"🗺️ Navigation Graph Manager initialisé: {self.graphs_dir}")
     
@@ -217,9 +235,9 @@ class NavigationGraphManager:
         
         return "\n".join(context_parts)
     
-    def save_navigation_graph(self, navigation_graph: dict, website_url: str) -> bool:
+    async def save_navigation_graph(self, navigation_graph: dict, website_url: str) -> bool:
         """
-        Sauvegarde un graph de navigation avec un nom basé sur le domaine
+        Sauvegarde un graph de navigation avec fusion des graphs existants
         
         Args:
             navigation_graph: Données du graph de navigation
@@ -236,14 +254,119 @@ class NavigationGraphManager:
             filename = f"{domain}_graph.json"
             filepath = self.graphs_dir / filename
             
-            # Sauvegarder le graph (sans métadonnées)
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(navigation_graph, f, indent=2, ensure_ascii=False)
+            # Vérifier si un graph existe déjà
+            if filepath.exists():
+                logger.info(f"🔄 Graph existant trouvé, fusion en cours...")
+                
+                # Charger le graph existant
+                with open(filepath, 'r', encoding='utf-8') as f:
+                    existing_graph = json.load(f)
+                
+                # Fusionner les graphs avec LLM
+                merged_graph = await self._merge_navigation_graphs(existing_graph, navigation_graph)
+                
+                # Sauvegarder le graph fusionné
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(merged_graph, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"✅ Graph de navigation fusionné et sauvegardé : {filepath}")
+            else:
+                # Premier graph pour ce domaine
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(navigation_graph, f, indent=2, ensure_ascii=False)
+                
+                logger.info(f"📊 Nouveau graph de navigation sauvegardé : {filepath}")
             
-            logger.info(f"📊 Graph de navigation sauvegardé : {filepath}")
             return True
             
         except Exception as e:
             logger.error(f"❌ Erreur lors de la sauvegarde du graph de navigation : {e}")
             return False
+    
+    async def _merge_navigation_graphs(self, existing_graph: dict, new_graph: dict) -> dict:
+        """
+        Fusionne deux graphs de navigation en utilisant le LLM
+        
+        Args:
+            existing_graph: Graph existant
+            new_graph: Nouveau graph à fusionner
+            
+        Returns:
+            Graph fusionné
+        """
+        try:
+            # Vérifier si le LLM est disponible
+            if not self.merge_llm:
+                logger.warning("⚠️ LLM non disponible, utilisation du nouveau graph uniquement")
+                return new_graph
+            
+            # Préparer les données pour le LLM
+            existing_graph_str = json.dumps(existing_graph, indent=2, ensure_ascii=False)
+            new_graph_str = json.dumps(new_graph, indent=2, ensure_ascii=False)
+            
+            # Créer le prompt pour la fusion
+            user_prompt = f"""## Existing Navigation Graph:
+```json
+{existing_graph_str}
+```
+
+## New Navigation Graph to Merge:
+```json
+{new_graph_str}
+```
+
+Please merge these two navigation graphs into a single, unified and exhaustive graph. Follow the instructions in the system prompt."""
+            
+            # Créer les messages
+            system_message = SystemMessage(content=SYSTEM_PROMPT_PROMPT_AGGREGATION)
+            user_message = UserMessage(content=user_prompt)
+            
+            # Appeler le LLM
+            logger.info("🤖 Fusion des graphs de navigation avec LLM...")
+            response = await self.merge_llm.ainvoke([system_message, user_message])
+            
+            # Extraire le graph fusionné de la réponse
+            merged_graph = self._extract_merged_graph_from_response(response.completion)
+            
+            logger.info("✅ Fusion des graphs terminée")
+            return merged_graph
+            
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de la fusion des graphs : {e}")
+            # En cas d'erreur, retourner le nouveau graph
+            return new_graph
+    
+    def _extract_merged_graph_from_response(self, response: str) -> dict:
+        """
+        Extrait le graph fusionné de la réponse du LLM
+        
+        Args:
+            response: Réponse du LLM
+            
+        Returns:
+            Graph fusionné extrait
+        """
+        try:
+            # Chercher le bloc JSON dans la réponse
+            import re
+            json_pattern = r'```json\s*(.*?)\s*```'
+            match = re.search(json_pattern, response, re.DOTALL)
+            
+            if match:
+                json_content = match.group(1).strip()
+                return json.loads(json_content)
+            else:
+                # Essayer de trouver du JSON sans les balises
+                json_pattern_no_tags = r'\{.*\}'
+                match = re.search(json_pattern_no_tags, response, re.DOTALL)
+                
+                if match:
+                    json_content = match.group(0)
+                    return json.loads(json_content)
+                else:
+                    raise ValueError("Aucun JSON trouvé dans la réponse du LLM")
+                    
+        except Exception as e:
+            logger.error(f"❌ Erreur lors de l'extraction du graph fusionné : {e}")
+            raise
     

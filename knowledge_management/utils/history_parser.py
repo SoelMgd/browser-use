@@ -136,10 +136,10 @@ def save_all_screenshots(history_data: Dict[str, Any], output_dir: str) -> List[
         screenshot = step.get('state', {}).get('screenshot', '')
         if screenshot:
             # Crop the screenshot before saving
-            cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
+            #cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
             screenshots.append({
                 'step_number': i,
-                'screenshot_base64': cropped_screenshot
+                'screenshot_base64': screenshot
             })
     
     saved_files = []
@@ -159,6 +159,7 @@ def save_all_screenshots(history_data: Dict[str, Any], output_dir: str) -> List[
 def crop_screenshot(screenshot_base64: str, target_size: Dict[str, int] = {'width': 1280, 'height': 1100}) -> str:
     """
     Crop a base64 screenshot to the target size
+    SHOULD NO LONGER BE USED, WE NOW SAVE THE FULL SCREENSHOT
     
     Args:
         screenshot_base64: Base64 encoded screenshot
@@ -252,14 +253,14 @@ def history_to_llm_messages(history_data: Dict[str, Any]) -> List[BaseMessage]:
         screenshot = step.get('state', {}).get('screenshot', '')
         if screenshot:
             # Crop screenshot to target size
-            cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
+            #cropped_screenshot = crop_screenshot(screenshot, {'width': 1280, 'height': 1100})
             
             # Create content parts: text + image
             content_parts = [
                 ContentPartTextParam(text=actions_str),
                 ContentPartImageParam(
                     image_url=ImageURL(
-                        url=f"data:image/png;base64,{cropped_screenshot}",
+                        url=f"data:image/png;base64,{screenshot}",
                         media_type='image/png',
                         detail='auto'
                     )

@@ -77,48 +77,69 @@ class PlanRAGManager:
             "text_for_embedding": task_title  # Use task_title directly for embedding
         }
     
-    def store_successful_plan(self, task_title: str, plan: str, 
-                            task_id: str) -> bool:
+    def store_successful_plan(self, plans_dict: Dict[str, str], task_id: str) -> bool:
         """
-        Store a successful plan in the vector database
+        Store successful plans in the vector database
         
         Args:
-            task_title: Generalized task title (will be embedded as-is)
-            plan: The successful plan
+            plans_dict: Dictionary of plans with titles as keys and plan content as values
             task_id: Unique task ID
             
         Returns:
-            True if storage was successful
+            True if storage was successful for all plans
         """
+        if not plans_dict:
+            logger.warning("⚠️ No plans to store")
+            return True
+        
+        success_count = 0
+        total_count = len(plans_dict)
+        
         try:
             execution_date = datetime.now().isoformat()
             
-            # Create document
-            document = self._create_plan_document(
-                task_title, plan, task_id, execution_date
-            )
+            for task_title, plan_content in plans_dict.items():
+                try:
+                    # Create document for this plan
+                    document = self._create_plan_document(
+                        task_title, plan_content, task_id, execution_date
+                    )
+                    
+                    # Generate embedding from task_title
+                    embedding = self.embedding_model.encode(document["text_for_embedding"])
+                    
+                    # Store in ChromaDB
+                    self.plans_collection.add(
+                        embeddings=[embedding.tolist()],
+                        documents=[document["text_for_embedding"]],
+                        metadatas=[{
+                            "task_title": task_title,
+                            "plan": plan_content,
+                            "task_id": task_id,
+                            "execution_date": execution_date
+                        }],
+                        ids=[f"plan_{task_id}_{task_title}_{datetime.now().timestamp()}"]
+                    )
+                    
+                    success_count += 1
+                    logger.info(f"💾 Plan stored in RAG: {task_title}")
+                    
+                except Exception as e:
+                    logger.error(f"❌ Error storing plan '{task_title}': {e}")
+                    continue
             
-            # Generate embedding from task_title
-            embedding = self.embedding_model.encode(document["text_for_embedding"])
-            
-            # Store in ChromaDB
-            self.plans_collection.add(
-                embeddings=[embedding.tolist()],
-                documents=[document["text_for_embedding"]],
-                metadatas=[{
-                    "task_title": task_title,
-                    "plan": plan,
-                    "task_id": task_id,
-                    "execution_date": execution_date
-                }],
-                ids=[f"plan_{task_id}_{datetime.now().timestamp()}"]
-            )
-            
-            logger.info(f"💾 Plan stored in RAG: {task_title}")
-            return True
-            
+            if success_count == total_count:
+                logger.info(f"✅ All {total_count} plans stored successfully")
+                return True
+            elif success_count > 0:
+                logger.warning(f"⚠️ {success_count}/{total_count} plans stored successfully")
+                return True
+            else:
+                logger.error(f"❌ Failed to store any of the {total_count} plans")
+                return False
+                
         except Exception as e:
-            logger.error(f"❌ Error storing plan: {e}")
+            logger.error(f"❌ Error in store_successful_plan: {e}")
             return False
     
     def find_similar_plans(self, task_title: str, top_k: int = 10) -> List[Dict[str, Any]]:
@@ -133,6 +154,7 @@ class PlanRAGManager:
             List of similar plans with their metadata
         """
         try:
+            logger.info(f"🔍 Searching similar plans for: {task_title}")
             # Generate embedding from task_title directly
             query_embedding = self.embedding_model.encode(task_title)
             
