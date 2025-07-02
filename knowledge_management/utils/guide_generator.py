@@ -9,9 +9,10 @@ This module generates optimized guides by combining:
 """
 
 import logging
-from typing import List, Dict, Any, Optional
+import os
+from typing import List, Dict, Any, Optional, Literal
 
-from browser_use.llm import ChatAnthropic
+from browser_use.llm import ChatAnthropic, ChatOpenAI
 from browser_use.llm.messages import SystemMessage, UserMessage
 
 from ..prompts.guide_generation_prompts import GUIDE_GENERATION_SYSTEM_PROMPT, GUIDE_GENERATION_USER_PROMPT_TEMPLATE
@@ -22,24 +23,44 @@ logger = logging.getLogger(__name__)
 class GuideGenerator:
     """Optimized guide generator service"""
     
-    def __init__(self, api_key: str):
+    def __init__(self, llm_provider: Literal["anthropic", "openai"] = "anthropic"):
         """
         Initialize the guide generator
         
         Args:
-            api_key: API key for the LLM
+            llm_provider: LLM provider ("anthropic" or "openai")
         """
-        self.api_key = api_key
+        self.llm_provider = llm_provider
         
         # Initialize LLM for guide generation
-        self.guide_llm = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            api_key=self.api_key,
-            max_tokens=4000,
-            temperature=0.2
-        )
+        self.guide_llm = None
         
-        logger.info("🎯 Guide Generator initialized")
+        if llm_provider == "anthropic":
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                self.guide_llm = ChatAnthropic(
+                    model="claude-sonnet-4-20250514",
+                    api_key=api_key,
+                    max_tokens=4000,
+                    temperature=0.2
+                )
+            else:
+                logger.warning("⚠️ ANTHROPIC_API_KEY non défini, la génération de guides sera désactivée")
+        elif llm_provider == "openai":
+            api_key = os.getenv('OPENAI_API_KEY')
+            if api_key:
+                self.guide_llm = ChatOpenAI(
+                    model="gpt-4o",
+                    api_key=api_key,
+                    max_tokens=4000,
+                    temperature=0.2
+                )
+            else:
+                logger.warning("⚠️ OPENAI_API_KEY non défini, la génération de guides sera désactivée")
+        else:
+            logger.warning(f"⚠️ Fournisseur LLM non reconnu: {llm_provider}, la génération de guides sera désactivée")
+        
+        logger.info(f"🎯 Guide Generator initialisé avec {llm_provider}")
     
     async def generate_optimized_guide(
         self,
@@ -122,6 +143,11 @@ class GuideGenerator:
         attempt_count: int
     ) -> str:
         """Generate guide with LLM"""
+        
+        # Vérifier si le LLM est disponible
+        if not self.guide_llm:
+            logger.warning("⚠️ LLM non disponible, utilisation du guide de fallback")
+            return self._generate_fallback_guide(task, previous_guide_context)
         
         # Build user prompt
         user_prompt = GUIDE_GENERATION_USER_PROMPT_TEMPLATE.format(

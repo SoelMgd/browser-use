@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Literal
 from urllib.parse import urlparse
 
 # Add project path
@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 # Browser-Use imports
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserProfile, BrowserSession
-from browser_use.llm import ChatAnthropic
+from browser_use.llm import ChatAnthropic, ChatOpenAI
 from browser_use.llm.messages import UserMessage
 
 # Local imports
@@ -48,12 +48,21 @@ load_dotenv()
 class TaskEvaluator:
     """Main class for task evaluation and improvement"""
     
-    def __init__(self, max_attempts: int = 3):
+    def __init__(self, max_attempts: int = 3, llm_provider: Literal["anthropic", "openai"] = "anthropic"):
         self.max_attempts = max_attempts
-        self.api_key = os.getenv('ANTHROPIC_API_KEY')
+        self.llm_provider = llm_provider
         
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY not defined in environment variables")
+        # Vérifier que la clé API appropriée est définie
+        if llm_provider == "anthropic":
+            self.api_key = os.getenv('ANTHROPIC_API_KEY')
+            if not self.api_key:
+                raise ValueError("ANTHROPIC_API_KEY not defined in environment variables")
+        elif llm_provider == "openai":
+            self.api_key = os.getenv('OPENAI_API_KEY')
+            if not self.api_key:
+                raise ValueError("OPENAI_API_KEY not defined in environment variables")
+        else:
+            raise ValueError(f"Fournisseur LLM non reconnu: {llm_provider}")
         
         # Initialize Browser-Use
         self.browser_session = BrowserSession(
@@ -67,17 +76,30 @@ class TaskEvaluator:
         )
         
         # Initialize LLM for Browser-Use
-        self.browser_llm = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-        )
+        if llm_provider == "anthropic":
+            self.browser_llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+            )
+        else:  # openai
+            self.browser_llm = ChatOpenAI(
+                model="gpt-4o",
+            )
         
         # Initialize evaluator LLM
-        self.evaluator_llm = ChatAnthropic(
-            model="claude-sonnet-4-20250514",
-            api_key=self.api_key,
-            max_tokens=6000,
-            temperature=0.1
-        )
+        if llm_provider == "anthropic":
+            self.evaluator_llm = ChatAnthropic(
+                model="claude-sonnet-4-20250514",
+                api_key=self.api_key,
+                max_tokens=6000,
+                temperature=0.1
+            )
+        else:  # openai
+            self.evaluator_llm = ChatOpenAI(
+                model="gpt-4o",
+                api_key=self.api_key,
+                max_tokens=6000,
+                temperature=0.1
+            )
         
         # Save paths
         self.navigation_graphs_dir = Path(__file__).parent / "navigation_graphs"
@@ -92,8 +114,10 @@ class TaskEvaluator:
         self.tmp_dir.mkdir(exist_ok=True)
         
         self.rag_manager = PlanRAGManager() # Initialize RAG manager for plans
-        self.nav_manager = NavigationGraphManager() # Initialize navigation graph manager
-        self.guide_generator = GuideGenerator(self.api_key) # Initialize optimized guide generator
+        self.nav_manager = NavigationGraphManager(llm_provider=llm_provider) # Initialize navigation graph manager
+        self.guide_generator = GuideGenerator(llm_provider=llm_provider) # Initialize optimized guide generator
+        
+        logger.info(f"🎯 TaskEvaluator initialisé avec {llm_provider}")
     
     def _generate_task_id(self, task: str) -> str:
         """Generate a unique ID for the task"""
@@ -456,17 +480,18 @@ async def main():
     """Main function"""
 
     CREDENTIALS = """ To login, use the following credentials: {
-  username: 'soel@twin.so',
-  password: '--!',
+  email: 'agentbenchmark6@gmail.com',
+  password: 'Agent123456!',
+  authtype: 'Google',
 }"""
     
     # Configuration
-    WEBSITE_URL = "https://www.bbb.org"
+    WEBSITE_URL = "https://www.crunchbase.com"
     TASK = """
-    Search for any businesses in Los Angeles with a BBB rating of A+ and list the names of the first five businesses displayed.
-    Only use https://www.bbb.org to achieve the task. Don't go to any other site. The task is achievable with just navigation from this site."""
+    Log in to Crunchbase and create a new list titled ""Tech Unicorns,"" then add the companies Uber, Airbnb, and Stripe to the list.
+    Only use https://www.crunchbase.com to achieve the task. Don't go to any other site. The task is achievable with just navigation from this site."""
 
-    TASK = TASK #+ CREDENTIALS
+    TASK = TASK + CREDENTIALS
     
     try:
         # Create evaluator

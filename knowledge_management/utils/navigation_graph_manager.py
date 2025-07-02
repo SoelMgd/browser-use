@@ -11,11 +11,11 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
-from browser_use.llm import ChatAnthropic
+from browser_use.llm import ChatAnthropic, ChatOpenAI
 from browser_use.llm.messages import SystemMessage, UserMessage
 from ..prompts.graph_aggregation_prompts import SYSTEM_PROMPT_PROMPT_AGGREGATION
 
@@ -25,12 +25,13 @@ logger = logging.getLogger(__name__)
 class NavigationGraphManager:
     """Gestionnaire pour les graphs de navigation"""
     
-    def __init__(self, graphs_dir: Optional[Path] = None):
+    def __init__(self, graphs_dir: Optional[Path] = None, llm_provider: Literal["anthropic", "openai"] = "anthropic"):
         """
         Initialise le gestionnaire de graphs de navigation
         
         Args:
             graphs_dir: Répertoire contenant les graphs de navigation
+            llm_provider: Fournisseur de LLM ("anthropic" ou "openai")
         """
         if graphs_dir is None:
             graphs_dir = Path(__file__).parent.parent / "navigation_graphs"
@@ -39,19 +40,34 @@ class NavigationGraphManager:
         self.graphs_dir.mkdir(exist_ok=True)
         
         # Initialiser le LLM pour la fusion des graphs
-        api_key = os.getenv('ANTHROPIC_API_KEY')
-        if api_key:
-            self.merge_llm = ChatAnthropic(
-                model="claude-sonnet-4-20250514",
-                api_key=api_key,
-                max_tokens=4000,
-                temperature=0.1
-            )
-        else:
-            self.merge_llm = None
-            logger.warning("⚠️ ANTHROPIC_API_KEY non défini, la fusion des graphs sera désactivée")
+        self.merge_llm = None
         
-        logger.info(f"🗺️ Navigation Graph Manager initialisé: {self.graphs_dir}")
+        if llm_provider == "anthropic":
+            api_key = os.getenv('ANTHROPIC_API_KEY')
+            if api_key:
+                self.merge_llm = ChatAnthropic(
+                    model="claude-sonnet-4-20250514",
+                    api_key=api_key,
+                    max_tokens=4000,
+                    temperature=0.1
+                )
+            else:
+                logger.warning("⚠️ ANTHROPIC_API_KEY non défini, la fusion des graphs sera désactivée")
+        elif llm_provider == "openai":
+            api_key = os.getenv('OPENAI_API_KEY')
+            if api_key:
+                self.merge_llm = ChatOpenAI(
+                    model="gpt-4o",
+                    api_key=api_key,
+                    max_tokens=4000,
+                    temperature=0.1
+                )
+            else:
+                logger.warning("⚠️ OPENAI_API_KEY non défini, la fusion des graphs sera désactivée")
+        else:
+            logger.warning(f"⚠️ Fournisseur LLM non reconnu: {llm_provider}, la fusion des graphs sera désactivée")
+        
+        logger.info(f"🗺️ Navigation Graph Manager initialisé: {self.graphs_dir} avec {llm_provider}")
     
     def _extract_domain(self, url: str) -> str:
         """
