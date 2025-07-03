@@ -18,19 +18,23 @@ load_dotenv()
 
 from browser_use.agent.service import Agent
 from browser_use.browser import BrowserProfile, BrowserSession
-from browser_use.llm import ChatOpenAI
+from browser_use.llm import ChatOpenAI, ChatAnthropic
 
 # Set LLM based on defined environment variables
-if os.getenv('OPENAI_API_KEY'):
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0.0
+#if os.getenv('OPENAI_API_KEY'):
+#    llm = ChatOpenAI(
+#        model="gpt-4o",
+#        temperature=0.0
+#    )
+if os.getenv('ANTHROPIC_API_KEY'):
+    llm = ChatAnthropic(
+        model="claude-3-5-sonnet-20241022",
     )
 else:
     raise ValueError('Failed to load OpenAI credentials')
 
 # Configuration
-CSV_FILE = "browser-use/knowledge_management/datasets/webbench_hitl_final.csv"
+CSV_FILE = "/Users/twin/Documents/Browser-Use-Graph/browser-use/knowledge_management/datasets/webbench_hitl_final.csv"
 OUTPUT_DIR = "browser-use/knowledge_management/hard_tasks_results"
 MAX_STEPS = 30
 
@@ -63,6 +67,9 @@ def load_hard_tasks() -> List[Dict[str, Any]]:
                 total_tasks += 1
                 if row['Difficulty'] == 'hard':
                     hard_tasks_count += 1
+                    # if task does not start with "Log in" continue
+                    if row['Task'].startswith("Log in"):
+                        continue
                     task = {
                         'id': str(row['ID']),
                         'starting_url': row['Starting URL'],
