@@ -21,15 +21,15 @@ from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.llm import ChatOpenAI, ChatAnthropic
 
 # Set LLM based on defined environment variables
-#if os.getenv('OPENAI_API_KEY'):
-#    llm = ChatOpenAI(
-#        model="gpt-4o",
-#        temperature=0.0
-#    )
-if os.getenv('ANTHROPIC_API_KEY'):
-    llm = ChatAnthropic(
-        model="claude-3-5-sonnet-20241022",
+if os.getenv('OPENAI_API_KEY'):
+    llm = ChatOpenAI(
+        model="gpt-4o",
+#       temperature=0.0
     )
+#if os.getenv('ANTHROPIC_API_KEY'):
+#    llm = ChatAnthropic(
+#        model="claude-3-5-sonnet-20241022",
+#    )
 else:
     raise ValueError('Failed to load OpenAI credentials')
 
@@ -67,8 +67,8 @@ def load_hard_tasks() -> List[Dict[str, Any]]:
                 total_tasks += 1
                 if row['Difficulty'] == 'hard':
                     hard_tasks_count += 1
-                    # if task does not start with "Log in" continue
-                    if row['Task'].startswith("Log in"):
+                    # if task does not start with "Log in" stop
+                    if not row['Task'].startswith("Log in"):
                         continue
                     task = {
                         'id': str(row['ID']),
@@ -90,11 +90,15 @@ def save_screenshots(history, task_id: str) -> List[str]:
     """Save screenshots from history and return list of saved file paths"""
     saved_files = []
     
+    # Create task-specific screenshots directory
+    task_screenshots_dir = Path(f"{OUTPUT_DIR}/screenshots/{task_id}")
+    task_screenshots_dir.mkdir(parents=True, exist_ok=True)
+    
     for i, history_item in enumerate(history.history):
         if history_item.state and history_item.state.screenshot:
             # Create filename
             filename = f"step_{i}.png"
-            filepath = Path(f"{OUTPUT_DIR}/screenshots/{task_id}_{filename}")
+            filepath = task_screenshots_dir / filename
             
             try:
                 # Decode base64 and save
